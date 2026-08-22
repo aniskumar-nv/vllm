@@ -471,22 +471,26 @@ class RadioParallelAttention(InternParallelAttention):
     def forward(
         self, x: torch.Tensor, mask_meta: MaskMetadata | None = None
     ) -> torch.Tensor:
-        print(f"[DEBUG-ATTN] x.shape={tuple(x.shape)}", flush=True)
+        orig_leading_shape = x.shape[:-1]
         qkv, _ = self.qkv(x)
-        print(f"[DEBUG-ATTN] qkv.shape={tuple(qkv.shape)}", flush=True)
+        if qkv.dim() == 2 and x.dim() == 3:
+            # QKVParallelLinear flattens leading (batch, seq) dims into a
+            # single dim under some code paths (observed here specifically
+            # when quantization is active, which disables the compiled
+            # multimodal-encoder path). Restore the original (B, N, ...)
+            # structure so the residual add downstream sees a shape
+            # consistent with hidden_states.
+            qkv = qkv.view(*orig_leading_shape, qkv.shape[-1])
         q, k, v = qkv.chunk(3, dim=-1)
-        print(f"[DEBUG-ATTN] q.shape={tuple(q.shape)} k.shape={tuple(k.shape)} v.shape={tuple(v.shape)}", flush=True)
 
         if self.qk_normalization:
             q, k = self._apply_qk_norm(q, k)
-            print(f"[DEBUG-ATTN] after qk_norm q.shape={tuple(q.shape)} k.shape={tuple(k.shape)}", flush=True)
 
         cu_seqlens, max_seqlen = None, None
         if mask_meta is not None:
             cu_seqlens = mask_meta.cu_seqlens
             max_seqlen = mask_meta.max_seqlen
         out = self.attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-        print(f"[DEBUG-ATTN] attn out.shape={tuple(out.shape)}", flush=True)
         out, _ = self.proj(out)
         return out
 
@@ -638,9 +642,6 @@ class RadioInternVisionModel(nn.Module):
                     imgs_sizes, device=hidden_states.device
                 )
 
-        print(f"[DEBUG-RADIO] pre-encoder hidden_states.shape={tuple(hidden_states.shape)} "
-              f"mask_meta.cu_seqlens={mask_meta.cu_seqlens.tolist() if mask_meta is not None else None} "
-              f"mask_meta.max_seqlen={mask_meta.max_seqlen.item() if mask_meta is not None else None}", flush=True)
         encoder_outputs = self.encoder(inputs_embeds=hidden_states, mask_meta=mask_meta)
 
         # Unpack back to original batch shape if we packed for video
