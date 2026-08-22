@@ -585,7 +585,10 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.vocab_size = config.decoder.vocab_size
         self.lm_head = ParallelLMHead(
-            config.decoder.vocab_size, config.decoder.d_model, quant_config=quant_config
+            config.decoder.vocab_size,
+            config.decoder.d_model,
+            quant_config=quant_config,
+            prefix=f"{prefix}.lm_head",
         )
         # Some checkpoints (e.g. compact exports) tie the output head to the
         # decoder's input embeddings instead of materializing a separate
