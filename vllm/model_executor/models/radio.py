@@ -474,12 +474,14 @@ class RadioParallelAttention(InternParallelAttention):
         orig_leading_shape = x.shape[:-1]
         qkv, _ = self.qkv(x)
         if qkv.dim() == 2 and x.dim() == 3:
-            # QKVParallelLinear (and, below, RowParallelLinear) flatten
-            # leading (batch, seq) dims into a single dim under some code
-            # paths (observed here when quantization is active, which
-            # disables the compiled multimodal-encoder path). Restore the
-            # original (B, N, ...) structure so downstream residual adds
-            # see a shape consistent with hidden_states.
+            # QKVParallelLinear flattens leading (batch, seq) dims into a
+            # single dim under some code paths (observed when quantization
+            # is active, which disables the compiled multimodal-encoder
+            # path). Restore the original (B, N, ...) structure so
+            # view_qkv_to_4d in MMEncoderAttention gets the shape it
+            # expects. The same flattening also happens on this layer's
+            # own proj() output and on the MLP's Linear layers -- that is
+            # handled generically in RadioVisionEncoderLayer.forward.
             qkv = qkv.view(*orig_leading_shape, qkv.shape[-1])
         q, k, v = qkv.chunk(3, dim=-1)
 
@@ -491,12 +493,7 @@ class RadioParallelAttention(InternParallelAttention):
             cu_seqlens = mask_meta.cu_seqlens
             max_seqlen = mask_meta.max_seqlen
         out = self.attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-        print(f"[DEBUG-QKVFIX] pre-proj out.shape={tuple(out.shape)}", flush=True)
         out, _ = self.proj(out)
-        print(f"[DEBUG-QKVFIX] post-proj out.shape={tuple(out.shape)}", flush=True)
-        if out.dim() == 2 and len(orig_leading_shape) > 1:
-            out = out.view(*orig_leading_shape, out.shape[-1])
-            print(f"[DEBUG-QKVFIX] reshaped post-proj out.shape={tuple(out.shape)}", flush=True)
         return out
 
 
@@ -504,17 +501,28 @@ class RadioVisionEncoderLayer(InternVisionEncoderLayer):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, attn_cls=RadioParallelAttention, **kwargs)
 
+    def _restore_shape(self, out: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        """Some Linear layers here (QKVParallelLinear/RowParallelLinear
+        under quantization, and the MLP's Linear layers) flatten a 3D
+        (B, N, hidden) input into a 2D (B*N, hidden) output instead of
+        preserving the leading dims. Restore ref's shape so the residual
+        add below sees consistent tensors."""
+        if out.dim() == 2 and ref.dim() == 3 and out.shape[0] == ref.shape[0] * ref.shape[1]:
+            return out.view(*ref.shape[:-1], out.shape[-1])
+        return out
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         mask_meta: MaskMetadata | None = None,
     ):
-        hidden_states = (
-            hidden_states
-            + self.attn(self.norm1(hidden_states), mask_meta=mask_meta) * self.ls1
-        )
+        attn_out = self.attn(self.norm1(hidden_states), mask_meta=mask_meta)
+        attn_out = self._restore_shape(attn_out, hidden_states)
+        hidden_states = hidden_states + attn_out * self.ls1
 
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states)) * self.ls2
+        mlp_out = self.mlp(self.norm2(hidden_states))
+        mlp_out = self._restore_shape(mlp_out, hidden_states)
+        hidden_states = hidden_states + mlp_out * self.ls2
 
         return hidden_states
 
