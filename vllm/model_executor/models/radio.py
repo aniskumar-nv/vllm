@@ -473,13 +473,15 @@ class RadioParallelAttention(InternParallelAttention):
     ) -> torch.Tensor:
         orig_leading_shape = x.shape[:-1]
         qkv, _ = self.qkv(x)
-        print(f"[DEBUG-QKVFIX] x.shape={tuple(x.shape)} qkv.shape={tuple(qkv.shape)} "
-              f"will_reshape={qkv.dim() == 2 and x.dim() == 3}", flush=True)
         if qkv.dim() == 2 and x.dim() == 3:
+            # QKVParallelLinear (and, below, RowParallelLinear) flatten
+            # leading (batch, seq) dims into a single dim under some code
+            # paths (observed here when quantization is active, which
+            # disables the compiled multimodal-encoder path). Restore the
+            # original (B, N, ...) structure so downstream residual adds
+            # see a shape consistent with hidden_states.
             qkv = qkv.view(*orig_leading_shape, qkv.shape[-1])
-            print(f"[DEBUG-QKVFIX] reshaped qkv.shape={tuple(qkv.shape)}", flush=True)
         q, k, v = qkv.chunk(3, dim=-1)
-        print(f"[DEBUG-QKVFIX] q.shape={tuple(q.shape)}", flush=True)
 
         if self.qk_normalization:
             q, k = self._apply_qk_norm(q, k)
@@ -489,7 +491,12 @@ class RadioParallelAttention(InternParallelAttention):
             cu_seqlens = mask_meta.cu_seqlens
             max_seqlen = mask_meta.max_seqlen
         out = self.attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        print(f"[DEBUG-QKVFIX] pre-proj out.shape={tuple(out.shape)}", flush=True)
         out, _ = self.proj(out)
+        print(f"[DEBUG-QKVFIX] post-proj out.shape={tuple(out.shape)}", flush=True)
+        if out.dim() == 2 and len(orig_leading_shape) > 1:
+            out = out.view(*orig_leading_shape, out.shape[-1])
+            print(f"[DEBUG-QKVFIX] reshaped post-proj out.shape={tuple(out.shape)}", flush=True)
         return out
 
 
