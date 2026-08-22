@@ -586,12 +586,19 @@ class MMEncoderAttention(CustomOp):
         # attention computation is unaffected (cu_seqlens is passed through
         # unchanged); only the bookkeeping/reshape is corrected, and the
         # output is flattened back to match the input shape.
-        was_packed_2d = query.dim() == 2 and cu_seqlens is not None
+        was_packed_2d = query.dim() == 2
         if was_packed_2d:
+            # A flattened (total_tokens, hidden) query -- e.g. from a
+            # ColumnParallelLinear under quantization that doesn't preserve
+            # leading batch/seq dims. Wrap it as a single batch of 1; when
+            # cu_seqlens is set, flash_attn_varlen_func still does the real
+            # per-item splitting internally using it, so bsz=1/q_len=total
+            # is correct regardless of whether cu_seqlens is present here
+            # (it's None during profile_run's dummy warmup).
             total_tokens = query.shape[0]
-            q_len = int(max_seqlen.item())
-            bsz = total_tokens // q_len
-            kv_len = q_len
+            bsz = 1
+            q_len = total_tokens
+            kv_len = key.shape[0]
         else:
             bsz, q_len = query.size()[:2]
             kv_len = key.size(1)
