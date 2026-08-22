@@ -146,6 +146,15 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if len(self.exclude_modules) == 0:
             return False
 
+        # A root-level model prefix of "" (the vLLM default) makes every
+        # descendant prefix start with a leading "." (e.g. "" + ".encoder"
+        # + ".sum_proj" -> ".encoder.sum_proj"). fnmatch requires matching
+        # from the start of the string, so a wildcard pattern like
+        # "encoder*" would never match -- silently letting an excluded
+        # layer fall through to the quantized path. Strip it before any
+        # matching below.
+        prefix = prefix.lstrip(".")
+
         # First check exact matching with fused layer support
         if is_layer_skipped(prefix, self.exclude_modules, self.packed_modules_mapping):
             return True
