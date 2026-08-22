@@ -575,8 +575,26 @@ class MMEncoderAttention(CustomOp):
             cu_seqlens is None and max_seqlen is None
         ), "cu_seqlens and max_seqlen should be both set or both None."
 
-        bsz, q_len = query.size()[:2]
-        kv_len = key.size(1)
+        # NOTE(patch): when the query arrives already packed/flattened as
+        # (total_tokens, hidden) -- e.g. a quantized ColumnParallelLinear
+        # upstream that doesn't preserve leading batch/seq dims -- naively
+        # reading bsz, q_len = query.size()[:2] treats total_tokens as the
+        # batch and hidden_size as the seq length, producing a bogus
+        # reshape target. Every item in this cu_seqlens batch has a fixed,
+        # uniform token count (max_seqlen == per-item length here), so the
+        # true (bsz, q_len) can be recovered exactly from it. The real
+        # attention computation is unaffected (cu_seqlens is passed through
+        # unchanged); only the bookkeeping/reshape is corrected, and the
+        # output is flattened back to match the input shape.
+        was_packed_2d = query.dim() == 2 and cu_seqlens is not None
+        if was_packed_2d:
+            total_tokens = query.shape[0]
+            q_len = int(max_seqlen.item())
+            bsz = total_tokens // q_len
+            kv_len = q_len
+        else:
+            bsz, q_len = query.size()[:2]
+            kv_len = key.size(1)
         is_reshaped = query.dim() != 4
 
         query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
@@ -592,7 +610,9 @@ class MMEncoderAttention(CustomOp):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
-        if is_reshaped:
+        if was_packed_2d:
+            output = output.reshape(total_tokens, -1)
+        elif is_reshaped:
             output = output.reshape(bsz, q_len, -1)
         return output
 
