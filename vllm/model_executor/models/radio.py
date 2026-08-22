@@ -473,15 +473,13 @@ class RadioParallelAttention(InternParallelAttention):
     ) -> torch.Tensor:
         orig_leading_shape = x.shape[:-1]
         qkv, _ = self.qkv(x)
+        print(f"[DEBUG-QKVFIX] x.shape={tuple(x.shape)} qkv.shape={tuple(qkv.shape)} "
+              f"will_reshape={qkv.dim() == 2 and x.dim() == 3}", flush=True)
         if qkv.dim() == 2 and x.dim() == 3:
-            # QKVParallelLinear flattens leading (batch, seq) dims into a
-            # single dim under some code paths (observed here specifically
-            # when quantization is active, which disables the compiled
-            # multimodal-encoder path). Restore the original (B, N, ...)
-            # structure so the residual add downstream sees a shape
-            # consistent with hidden_states.
             qkv = qkv.view(*orig_leading_shape, qkv.shape[-1])
+            print(f"[DEBUG-QKVFIX] reshaped qkv.shape={tuple(qkv.shape)}", flush=True)
         q, k, v = qkv.chunk(3, dim=-1)
+        print(f"[DEBUG-QKVFIX] q.shape={tuple(q.shape)}", flush=True)
 
         if self.qk_normalization:
             q, k = self._apply_qk_norm(q, k)
